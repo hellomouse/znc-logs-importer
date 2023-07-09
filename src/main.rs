@@ -113,6 +113,8 @@ enum IrcPresenceType {
 enum IrcMessageType {
     #[postgres(name = "message")]
     Message,
+    #[postgres(name = "emote")]
+    Emote,
     #[postgres(name = "notice")]
     Notice,
 }
@@ -253,60 +255,78 @@ async fn process_log_line(
 
     match rest.chars().nth(0) {
         Some('*') => {
-            // system message
             let Some((stars, system_message)) = rest.split_once(' ') else {
                 warn!("parse failed (nothing after stars): {:?}", line);
                 return Ok(());
             };
-            if stars != "***" {
+            if stars == "*" {
+                // /me
+                let Some((nick, message)) = system_message.split_once(' ') else {
+                    warn!("parse failed (nothing after nick): {:?}", line);
+                    return Ok(());
+                };
+
+                let message_type = IrcMessageType::Emote;
+                trace!(%message_ts, ?message_type, nick, line = message, "message");
+
+                transaction
+                    .query(
+                        &prepared.insert_message,
+                        &[&message_ts, channel, &nick, &message_type, &message],
+                    )
+                    .await
+                    .wrap_err("failed to insert into irc_message")?;
+            } else if stars == "***" {
+                // system message
+                if let Some(parsed) = PRESENCE_MESSAGE_REGEX.captures(system_message) {
+                    let event_type = match &parsed[1] {
+                        "Joins" => IrcPresenceType::Join,
+                        "Parts" => IrcPresenceType::Part,
+                        "Quits" => IrcPresenceType::Quit,
+                        _ => unreachable!("invalid regex match"),
+                    };
+                    let nick = &parsed[2];
+                    let user = &parsed[3];
+                    let host = &parsed[4];
+                    let reason = parsed.get(5).map(|s| s.as_str());
+
+                    trace!(%message_ts, ?event_type, nick, user, host, reason, "presence");
+
+                    transaction
+                        .query(
+                            &prepared.insert_presence,
+                            &[
+                                &message_ts,
+                                channel,
+                                &event_type,
+                                &nick,
+                                &user,
+                                &host,
+                                &reason,
+                            ],
+                        )
+                        .await
+                        .wrap_err("failed insert into irc_presence")?;
+                } else if let Some(parsed) = NICK_CHANGE_REGEX.captures(system_message) {
+                    let old_nick = &parsed[1];
+                    let new_nick = &parsed[2];
+
+                    trace!(%message_ts, old_nick, new_nick, "nick change");
+
+                    transaction
+                        .query(
+                            &prepared.insert_nick_change,
+                            &[&message_ts, channel, &old_nick, &new_nick],
+                        )
+                        .await
+                        .wrap_err("failed to insert into irc_nick_change")?;
+                } else {
+                    trace!("ignoring other message: {:?}", system_message);
+                };
+            } else {
                 warn!("parse failed (bad stars): {:?}", line);
                 return Ok(());
             }
-            if let Some(parsed) = PRESENCE_MESSAGE_REGEX.captures(system_message) {
-                let event_type = match &parsed[1] {
-                    "Joins" => IrcPresenceType::Join,
-                    "Parts" => IrcPresenceType::Part,
-                    "Quits" => IrcPresenceType::Quit,
-                    _ => unreachable!("invalid regex match"),
-                };
-                let nick = &parsed[2];
-                let user = &parsed[3];
-                let host = &parsed[4];
-                let reason = parsed.get(5).map(|s| s.as_str());
-
-                trace!(%message_ts, ?event_type, nick, user, host, reason, "presence");
-
-                transaction
-                    .query(
-                        &prepared.insert_presence,
-                        &[
-                            &message_ts,
-                            channel,
-                            &event_type,
-                            &nick,
-                            &user,
-                            &host,
-                            &reason,
-                        ],
-                    )
-                    .await
-                    .wrap_err("failed insert into irc_presence")?;
-            } else if let Some(parsed) = NICK_CHANGE_REGEX.captures(system_message) {
-                let old_nick = &parsed[1];
-                let new_nick = &parsed[2];
-
-                trace!(%message_ts, old_nick, new_nick, "nick change");
-
-                transaction
-                    .query(
-                        &prepared.insert_nick_change,
-                        &[&message_ts, channel, &old_nick, &new_nick],
-                    )
-                    .await
-                    .wrap_err("failed to insert into irc_nick_change")?;
-            } else {
-                trace!("ignoring other message: {:?}", system_message);
-            };
             Ok(())
         }
         Some(type_char @ ('<' | '-')) => {
@@ -323,12 +343,14 @@ async fn process_log_line(
             };
 
             let rest = &rest[1..];
-            let (nick, message) = rest
-                .split_once(close_char)
-                .ok_or_else(|| eyre!("parse failed (no matching pair for nick): {:?}", line))?;
-            let message = message
-                .get(1..)
-                .ok_or_else(|| eyre!("parse failed (nothing after nick): {:?}", line))?;
+            let Some((nick, message)) = rest.split_once(close_char) else {
+                warn!("parse failed (no matching pair for nick): {:?}", line);
+                return Ok(());
+            };
+            let Some(message) = message.get(1..) else {
+                warn!("parse failed (nothing after nick): {:?}", line);
+                return Ok(());
+            };
 
             trace!(%message_ts, ?message_type, nick, line = message, "message");
 

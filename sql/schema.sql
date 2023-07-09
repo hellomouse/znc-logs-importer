@@ -1,5 +1,5 @@
 CREATE TYPE irc_message_type AS ENUM (
-    'message', 'notice'
+    'message', 'emote', 'notice'
 );
 
 CREATE TABLE IF NOT EXISTS irc_message (
