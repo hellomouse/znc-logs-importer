@@ -1,5 +1,6 @@
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
-use eyre::{eyre, Result, WrapErr};
+use color_eyre::Result;
+use eyre::{eyre, WrapErr};
 use futures::FutureExt;
 use lazy_static::lazy_static;
 use postgres_types::{FromSql, ToSql};
@@ -11,10 +12,28 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_postgres::Statement;
 use tracing::{info, info_span, trace, warn, Instrument};
 
+fn initialize_logging() {
+    use tracing_error::ErrorLayer;
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    color_eyre::install().unwrap();
+
+    let fmt_layer = fmt::layer();
+    let filter_layer = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("info"))
+        .unwrap();
+
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(fmt_layer)
+        .with(ErrorLayer::default())
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // initialize logging
-    tracing_subscriber::fmt::init();
+    initialize_logging();
 
     // exit on panic
     let default_panic = std::panic::take_hook();
