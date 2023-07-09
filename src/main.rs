@@ -203,10 +203,10 @@ async fn file_reader_worker(
                 .await
                 .wrap_err("begin transaction")?;
 
-            let mut line_buf = String::new();
+            let mut line_buf = Vec::new();
             loop {
                 let bytes_read = reader
-                    .read_line(&mut line_buf)
+                    .read_until(b'\n', &mut line_buf)
                     .await
                     .wrap_err("read log line")?;
                 if bytes_read == 0 {
@@ -214,11 +214,14 @@ async fn file_reader_worker(
                     break;
                 }
 
-                if line_buf.ends_with('\n') {
-                    line_buf.pop();
-                }
+                let line_owned = String::from_utf8_lossy(&line_buf);
+                let line = if let Some(trimmed) = line_owned.strip_suffix('\n') {
+                    trimmed
+                } else {
+                    line_owned.as_ref()
+                };
 
-                process_log_line(&channel, &mut transaction, &prepared, &file_date, &line_buf)
+                process_log_line(&channel, &mut transaction, &prepared, &file_date, &line)
                     .await
                     .wrap_err("parse line")?;
 
@@ -240,7 +243,7 @@ async fn process_log_line(
     transaction: &mut tokio_postgres::Transaction<'_>,
     prepared: &SqlPreparedStatements,
     file_date: &NaiveDate,
-    line: &String,
+    line: &str,
 ) -> Result<()> {
     lazy_static! {
         // hh, mm, ss
